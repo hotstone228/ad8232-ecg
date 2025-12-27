@@ -142,16 +142,35 @@ INDEX_HTML = r"""
   <title>ECG Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --bg: #0d0f14;
+      --panel: #151a22;
+      --panel-border: #2a3140;
+      --text: #e6e9f2;
+      --muted: #a6adbb;
+      --accent: #ff3b30;
+    }
     body {
       font-family: system-ui, sans-serif;
       margin: 0;
       height: 100vh;
       display: flex;
       flex-direction: column;
+      background: var(--bg);
+      color: var(--text);
     }
-    header { padding: 12px 16px 0; }
-    #status { margin-bottom: 8px; opacity: 0.8; }
+    header {
+      padding: 16px 20px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-bottom: 1px solid var(--panel-border);
+      background: linear-gradient(180deg, rgba(21, 26, 34, 0.9), rgba(13, 15, 20, 0.9));
+      backdrop-filter: blur(6px);
+    }
+    h2 { margin: 0; font-size: 1.2rem; font-weight: 600; }
+    #status { color: var(--muted); font-size: 0.9rem; }
     #plot {
       flex: 1;
       min-height: 200px;
@@ -159,13 +178,56 @@ INDEX_HTML = r"""
     }
     .row {
       display: flex;
-      gap: 16px;
+      gap: 12px;
       align-items: center;
       flex-wrap: wrap;
     }
-    input { width: 110px; }
-    #pulse { font-weight: 600; }
-    #metrics { font-size: 0.95rem; opacity: 0.9; margin-top: 6px; }
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    input {
+      width: 120px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      color: var(--text);
+    }
+    button {
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    #pulse {
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+    }
+    #metrics {
+      font-size: 0.9rem;
+      color: var(--muted);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .metric-pill {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      color: var(--text);
+    }
   </style>
 
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.32/dist/uPlot.min.css">
@@ -176,19 +238,25 @@ INDEX_HTML = r"""
     <div id="status">Connecting…</div>
 
     <div class="row">
-      <label>Window (sec):
+      <label class="control">Window (sec)
         <input id="winSec" type="number" min="1" max="60" step="1" value="10">
       </label>
-      <label>FS (Hz):
+      <label class="control">FS (Hz)
         <input id="fsHz" type="number" min="10" max="2000" step="10" value="250">
       </label>
-      <label>Pulse windows (sec):
+      <label class="control">Pulse windows (sec)
         <input id="pulseWin" type="text" value="5,10,20">
       </label>
       <button id="clearBtn">Clear</button>
       <span id="pulse">Pulse: —</span>
     </div>
-    <div id="metrics">RR mean: — | SDNN: — | RR min/max: — | Beats: —</div>
+    <div id="metrics">
+      <span class="metric-pill" id="metricRr">RR mean: —</span>
+      <span class="metric-pill" id="metricSdnn">SDNN: —</span>
+      <span class="metric-pill" id="metricRange">RR min/max: —</span>
+      <span class="metric-pill" id="metricBeats">Beats: —</span>
+      <span class="metric-pill" id="metricBpm">BPM: —</span>
+    </div>
   </header>
 
   <div id="plot"></div>
@@ -201,7 +269,11 @@ INDEX_HTML = r"""
     const clearBtn = document.getElementById("clearBtn");
     const pulseWinEl = document.getElementById("pulseWin");
     const pulseEl = document.getElementById("pulse");
-    const metricsEl = document.getElementById("metrics");
+    const metricRrEl = document.getElementById("metricRr");
+    const metricSdnnEl = document.getElementById("metricSdnn");
+    const metricRangeEl = document.getElementById("metricRange");
+    const metricBeatsEl = document.getElementById("metricBeats");
+    const metricBpmEl = document.getElementById("metricBpm");
     const plotEl = document.getElementById("plot");
 
     let y = [];
@@ -364,18 +436,30 @@ INDEX_HTML = r"""
       const metricWindow = Math.max(...windows);
       const metricSamples = Math.floor(metricWindow * fs);
       if (y.length < metricSamples) {
-        metricsEl.textContent = "RR mean: — | SDNN: — | RR min/max: — | Beats: —";
+        metricRrEl.textContent = "RR mean: —";
+        metricSdnnEl.textContent = "SDNN: —";
+        metricRangeEl.textContent = "RR min/max: —";
+        metricBeatsEl.textContent = "Beats: —";
+        metricBpmEl.textContent = "BPM: —";
         return;
       }
 
       const metricSegment = y.slice(-metricSamples);
       const metrics = computeHrMetrics(metricSegment, fs);
       if (!metrics) {
-        metricsEl.textContent = "RR mean: — | SDNN: — | RR min/max: — | Beats: —";
+        metricRrEl.textContent = "RR mean: —";
+        metricSdnnEl.textContent = "SDNN: —";
+        metricRangeEl.textContent = "RR min/max: —";
+        metricBeatsEl.textContent = "Beats: —";
+        metricBpmEl.textContent = "BPM: —";
         return;
       }
 
-      metricsEl.textContent = `RR mean: ${metrics.rrMeanMs} ms | SDNN: ${metrics.sdnnMs} ms | RR min/max: ${metrics.rrMinMs}/${metrics.rrMaxMs} ms | Beats: ${metrics.beats} | BPM: ${metrics.bpm}`;
+      metricRrEl.textContent = `RR mean: ${metrics.rrMeanMs} ms`;
+      metricSdnnEl.textContent = `SDNN: ${metrics.sdnnMs} ms`;
+      metricRangeEl.textContent = `RR min/max: ${metrics.rrMinMs}/${metrics.rrMaxMs} ms`;
+      metricBeatsEl.textContent = `Beats: ${metrics.beats}`;
+      metricBpmEl.textContent = `BPM: ${metrics.bpm}`;
     }
 
     const wsProto = (location.protocol === "https:") ? "wss" : "ws";
