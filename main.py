@@ -142,28 +142,52 @@ INDEX_HTML = r"""
   <title>ECG Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; }
-    #status { margin-bottom: 10px; opacity: 0.8; }
-    #plot { width: 100%; max-width: 1200px; }
-    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    input { width: 100px; }
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header { padding: 12px 16px 0; }
+    #status { margin-bottom: 8px; opacity: 0.8; }
+    #plot {
+      flex: 1;
+      min-height: 200px;
+      width: 100%;
+    }
+    .row {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input { width: 110px; }
+    #pulse { font-weight: 600; }
   </style>
 
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.32/dist/uPlot.min.css">
 </head>
 <body>
-  <h2>ECG Live (filtered on server)</h2>
-  <div id="status">Connecting…</div>
+  <header>
+    <h2>ECG Live (filtered on server)</h2>
+    <div id="status">Connecting…</div>
 
-  <div class="row">
-    <label>Window (sec):
-      <input id="winSec" type="number" min="1" max="60" step="1" value="10">
-    </label>
-    <label>FS (Hz):
-      <input id="fsHz" type="number" min="10" max="2000" step="10" value="250">
-    </label>
-    <button id="clearBtn">Clear</button>
-  </div>
+    <div class="row">
+      <label>Window (sec):
+        <input id="winSec" type="number" min="1" max="60" step="1" value="10">
+      </label>
+      <label>FS (Hz):
+        <input id="fsHz" type="number" min="10" max="2000" step="10" value="250">
+      </label>
+      <label>Pulse windows (sec):
+        <input id="pulseWin" type="text" value="5,10,20">
+      </label>
+      <button id="clearBtn">Clear</button>
+      <span id="pulse">Pulse: —</span>
+    </div>
+  </header>
 
   <div id="plot"></div>
 
@@ -173,6 +197,9 @@ INDEX_HTML = r"""
     const winSecEl = document.getElementById("winSec");
     const fsHzEl = document.getElementById("fsHz");
     const clearBtn = document.getElementById("clearBtn");
+    const pulseWinEl = document.getElementById("pulseWin");
+    const pulseEl = document.getElementById("pulse");
+    const plotEl = document.getElementById("plot");
 
     let y = [];
     let x = [];
@@ -192,9 +219,16 @@ INDEX_HTML = r"""
       }
     }
 
+    function getPlotSize() {
+      const headerHeight = document.querySelector("header").offsetHeight;
+      return {
+        width: window.innerWidth,
+        height: Math.max(200, window.innerHeight - headerHeight)
+      };
+    }
+
     const opts = {
-      width: Math.min(1200, window.innerWidth - 40),
-      height: 450,
+      ...getPlotSize(),
       scales: { x: { time: false } },
       series: [
         { label: "t (s)" },
@@ -206,12 +240,13 @@ INDEX_HTML = r"""
       ],
     };
 
-    let u = new uPlot(opts, [[0],[0]], document.getElementById("plot"));
+    let u = new uPlot(opts, [[0],[0]], plotEl);
 
     function updatePlot() {
       rebuildX();
       // resetScales=true и новые ссылки на массивы (slice) — чтобы точно рисовалось
       u.setData([x.slice(), y.slice()], true);
+      updatePulse();
     }
 
     function pushValue(v) {
@@ -224,12 +259,70 @@ INDEX_HTML = r"""
       y = [];
       x = [];
       u.setData([[0],[0]], true);
+      updatePulse();
     };
 
     window.addEventListener("resize", () => {
-      u.setSize({width: Math.min(1200, window.innerWidth - 40), height: 450});
+      u.setSize(getPlotSize());
       updatePlot();
     });
+
+    function parsePulseWindows() {
+      const raw = (pulseWinEl.value || "").split(",");
+      const windows = raw
+        .map((v) => Number(v.trim()))
+        .filter((v) => Number.isFinite(v) && v > 0 && v <= 60);
+      return windows.length ? windows : [5, 10, 20];
+    }
+
+    function computeBpm(samples, fs) {
+      if (samples.length < fs * 2) return null;
+
+      let sum = 0;
+      for (const v of samples) sum += v;
+      const mean = sum / samples.length;
+
+      let variance = 0;
+      for (const v of samples) {
+        const d = v - mean;
+        variance += d * d;
+      }
+      const std = Math.sqrt(variance / samples.length);
+      const threshold = mean + std * 0.6;
+      const minSamples = Math.max(1, Math.floor(fs * 0.25));
+
+      let peaks = 0;
+      let lastPeak = -minSamples;
+
+      for (let i = 1; i < samples.length - 1; i++) {
+        const v = samples[i];
+        if (v > threshold && v > samples[i - 1] && v >= samples[i + 1]) {
+          if (i - lastPeak >= minSamples) {
+            peaks += 1;
+            lastPeak = i;
+          }
+        }
+      }
+
+      if (peaks < 1) return null;
+      const durationSec = samples.length / fs;
+      return Math.round((peaks / durationSec) * 60);
+    }
+
+    function updatePulse() {
+      const fs = Number(fsHzEl.value || 250);
+      const windows = parsePulseWindows();
+      const parts = windows.map((sec) => {
+        const samples = Math.floor(sec * fs);
+        if (y.length < samples) {
+          return `${sec}s: —`;
+        }
+        const segment = y.slice(-samples);
+        const bpm = computeBpm(segment, fs);
+        return `${sec}s: ${bpm ?? "—"} bpm`;
+      });
+      pulseEl.textContent = `Pulse: ${parts.join(" | ")}`;
+    }
 
     const wsProto = (location.protocol === "https:") ? "wss" : "ws";
     const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
