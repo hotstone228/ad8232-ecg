@@ -165,6 +165,7 @@ INDEX_HTML = r"""
     }
     input { width: 110px; }
     #pulse { font-weight: 600; }
+    #metrics { font-size: 0.95rem; opacity: 0.9; margin-top: 6px; }
   </style>
 
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.32/dist/uPlot.min.css">
@@ -187,6 +188,7 @@ INDEX_HTML = r"""
       <button id="clearBtn">Clear</button>
       <span id="pulse">Pulse: —</span>
     </div>
+    <div id="metrics">RR mean: — | SDNN: — | RR min/max: — | Beats: —</div>
   </header>
 
   <div id="plot"></div>
@@ -199,6 +201,7 @@ INDEX_HTML = r"""
     const clearBtn = document.getElementById("clearBtn");
     const pulseWinEl = document.getElementById("pulseWin");
     const pulseEl = document.getElementById("pulse");
+    const metricsEl = document.getElementById("metrics");
     const plotEl = document.getElementById("plot");
 
     let y = [];
@@ -275,7 +278,7 @@ INDEX_HTML = r"""
       return windows.length ? windows : [5, 10, 20];
     }
 
-    function computeBpm(samples, fs) {
+    function detectPeaks(samples, fs) {
       if (samples.length < fs * 2) return null;
 
       let sum = 0;
@@ -291,22 +294,56 @@ INDEX_HTML = r"""
       const threshold = mean + std * 0.6;
       const minSamples = Math.max(1, Math.floor(fs * 0.25));
 
-      let peaks = 0;
+      const peaks = [];
       let lastPeak = -minSamples;
 
       for (let i = 1; i < samples.length - 1; i++) {
         const v = samples[i];
         if (v > threshold && v > samples[i - 1] && v >= samples[i + 1]) {
           if (i - lastPeak >= minSamples) {
-            peaks += 1;
+            peaks.push(i);
             lastPeak = i;
           }
         }
       }
 
-      if (peaks < 1) return null;
+      return peaks;
+    }
+
+    function computeBpmFromPeaks(peaks, samples, fs) {
+      if (!peaks || peaks.length < 1) return null;
       const durationSec = samples.length / fs;
-      return Math.round((peaks / durationSec) * 60);
+      return Math.round((peaks.length / durationSec) * 60);
+    }
+
+    function computeHrMetrics(samples, fs) {
+      const peaks = detectPeaks(samples, fs);
+      if (!peaks || peaks.length < 2) return null;
+
+      const rr = [];
+      for (let i = 1; i < peaks.length; i++) {
+        rr.push((peaks[i] - peaks[i - 1]) / fs);
+      }
+
+      const rrMean = rr.reduce((a, b) => a + b, 0) / rr.length;
+      const rrMin = Math.min(...rr);
+      const rrMax = Math.max(...rr);
+
+      let variance = 0;
+      for (const v of rr) {
+        const d = v - rrMean;
+        variance += d * d;
+      }
+      const sdnn = Math.sqrt(variance / rr.length);
+
+      return {
+        bpm: Math.round(60 / rrMean),
+        rrMeanMs: Math.round(rrMean * 1000),
+        rrMinMs: Math.round(rrMin * 1000),
+        rrMaxMs: Math.round(rrMax * 1000),
+        sdnnMs: Math.round(sdnn * 1000),
+        beats: peaks.length,
+      };
     }
 
     function updatePulse() {
@@ -318,10 +355,27 @@ INDEX_HTML = r"""
           return `${sec}s: —`;
         }
         const segment = y.slice(-samples);
-        const bpm = computeBpm(segment, fs);
+        const peaks = detectPeaks(segment, fs);
+        const bpm = computeBpmFromPeaks(peaks, segment, fs);
         return `${sec}s: ${bpm ?? "—"} bpm`;
       });
       pulseEl.textContent = `Pulse: ${parts.join(" | ")}`;
+
+      const metricWindow = Math.max(...windows);
+      const metricSamples = Math.floor(metricWindow * fs);
+      if (y.length < metricSamples) {
+        metricsEl.textContent = "RR mean: — | SDNN: — | RR min/max: — | Beats: —";
+        return;
+      }
+
+      const metricSegment = y.slice(-metricSamples);
+      const metrics = computeHrMetrics(metricSegment, fs);
+      if (!metrics) {
+        metricsEl.textContent = "RR mean: — | SDNN: — | RR min/max: — | Beats: —";
+        return;
+      }
+
+      metricsEl.textContent = `RR mean: ${metrics.rrMeanMs} ms | SDNN: ${metrics.sdnnMs} ms | RR min/max: ${metrics.rrMinMs}/${metrics.rrMaxMs} ms | Beats: ${metrics.beats} | BPM: ${metrics.bpm}`;
     }
 
     const wsProto = (location.protocol === "https:") ? "wss" : "ws";
