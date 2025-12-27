@@ -23,6 +23,10 @@ WS_CLIENTS = set()
 RING_MAX = 5000
 ring = []
 
+# ====== ДЕЦИМАЦИЯ/ПЕРЕДАЧА ======
+WS_SEND_HZ = 25.0   # частота отправки в браузер (Гц)
+DECIMATE = 5        # передавать каждый N-й сэмпл (с усреднением)
+
 
 def _clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -276,17 +280,24 @@ INDEX_HTML = r"""
     const metricBpmEl = document.getElementById("metricBpm");
     const plotEl = document.getElementById("plot");
 
+    const DECIMATE = 5; // должно совпадать с серверной DECIMATE
+
     let y = [];
     let x = [];
 
-    function getWinSamples() {
+    function getEffectiveFs() {
       const fs = Number(fsHzEl.value || 250);
+      return fs / DECIMATE;
+    }
+
+    function getWinSamples() {
+      const fs = getEffectiveFs();
       const winSec = Number(winSecEl.value || 10);
       return Math.max(10, Math.floor(fs * winSec));
     }
 
     function rebuildX() {
-      const fs = Number(fsHzEl.value || 250);
+      const fs = getEffectiveFs();
       const n = y.length;
       x = new Array(n);
       for (let i = 0; i < n; i++) {
@@ -419,7 +430,7 @@ INDEX_HTML = r"""
     }
 
     function updatePulse() {
-      const fs = Number(fsHzEl.value || 250);
+      const fs = getEffectiveFs();
       const windows = parsePulseWindows();
       const parts = windows.map((sec) => {
         const samples = Math.floor(sec * fs);
@@ -534,6 +545,11 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
     flt = ECGFilter(fs=FS_HZ)
 
     buf = ""
+    pending_lines = []
+    decim_acc = 0.0
+    decim_count = 0
+    send_interval = 1.0 / WS_SEND_HZ
+    next_send_ts = asyncio.get_event_loop().time() + send_interval
     try:
         while True:
             data = await reader.read(4096)
@@ -551,7 +567,6 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
             lines = buf.split("\n")
             buf = lines.pop()  # хвост без \n
 
-            out_lines = []
             for line in lines:
                 s = line.strip()
                 if not s:
@@ -563,15 +578,24 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
 
                 y = flt.process(v)
 
-                # сохраняем и рассылаем уже фильтрованный
+                # сохраняем в кольцевой буфер (в полной частоте)
                 ring.append(y)
                 if len(ring) > RING_MAX:
                     del ring[:len(ring) - RING_MAX]
 
-                out_lines.append(f"{y:.2f}")
+                # децимация с усреднением
+                decim_acc += y
+                decim_count += 1
+                if decim_count >= DECIMATE:
+                    pending_lines.append(f"{(decim_acc / decim_count):.2f}")
+                    decim_acc = 0.0
+                    decim_count = 0
 
-            if out_lines:
-                await broadcast("\n".join(out_lines) + "\n")
+            now = asyncio.get_event_loop().time()
+            if pending_lines and now >= next_send_ts:
+                await broadcast("\n".join(pending_lines) + "\n")
+                pending_lines.clear()
+                next_send_ts = now + send_interval
 
     finally:
         try:
