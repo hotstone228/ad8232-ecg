@@ -23,6 +23,10 @@ WS_CLIENTS = set()
 RING_MAX = 5000
 ring = []
 
+# ====== ДЕЦИМАЦИЯ/ПЕРЕДАЧА ======
+WS_SEND_HZ = 25.0   # частота отправки в браузер (Гц)
+DECIMATE = 5        # передавать каждый N-й сэмпл (с усреднением)
+
 
 def _clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -142,28 +146,122 @@ INDEX_HTML = r"""
   <title>ECG Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; }
-    #status { margin-bottom: 10px; opacity: 0.8; }
-    #plot { width: 100%; max-width: 1200px; }
-    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    input { width: 100px; }
+    :root {
+      color-scheme: light dark;
+      --bg: #0d0f14;
+      --panel: #151a22;
+      --panel-border: #2a3140;
+      --text: #e6e9f2;
+      --muted: #a6adbb;
+      --accent: #ff3b30;
+    }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 16px 20px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-bottom: 1px solid var(--panel-border);
+      background: linear-gradient(180deg, rgba(21, 26, 34, 0.9), rgba(13, 15, 20, 0.9));
+      backdrop-filter: blur(6px);
+    }
+    h2 { margin: 0; font-size: 1.2rem; font-weight: 600; }
+    #status { color: var(--muted); font-size: 0.9rem; }
+    #plot {
+      flex: 1;
+      min-height: 200px;
+      width: 100%;
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    input {
+      width: 120px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      color: var(--text);
+    }
+    button {
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    #pulse {
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+    }
+    #metrics {
+      font-size: 0.9rem;
+      color: var(--muted);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .metric-pill {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      color: var(--text);
+    }
   </style>
 
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.32/dist/uPlot.min.css">
 </head>
 <body>
-  <h2>ECG Live (filtered on server)</h2>
-  <div id="status">Connecting…</div>
+  <header>
+    <h2>ECG Live (filtered on server)</h2>
+    <div id="status">Connecting…</div>
 
-  <div class="row">
-    <label>Window (sec):
-      <input id="winSec" type="number" min="1" max="60" step="1" value="10">
-    </label>
-    <label>FS (Hz):
-      <input id="fsHz" type="number" min="10" max="2000" step="10" value="250">
-    </label>
-    <button id="clearBtn">Clear</button>
-  </div>
+    <div class="row">
+      <label class="control">Window (sec)
+        <input id="winSec" type="number" min="1" max="60" step="1" value="10">
+      </label>
+      <label class="control">FS (Hz)
+        <input id="fsHz" type="number" min="10" max="2000" step="10" value="250">
+      </label>
+      <label class="control">Pulse windows (sec)
+        <input id="pulseWin" type="text" value="5,10,20">
+      </label>
+      <button id="clearBtn">Clear</button>
+      <span id="pulse">Pulse: —</span>
+    </div>
+    <div id="metrics">
+      <span class="metric-pill" id="metricRr">RR mean: —</span>
+      <span class="metric-pill" id="metricSdnn">SDNN: —</span>
+      <span class="metric-pill" id="metricRange">RR min/max: —</span>
+      <span class="metric-pill" id="metricBeats">Beats: —</span>
+      <span class="metric-pill" id="metricBpm">BPM: —</span>
+    </div>
+  </header>
 
   <div id="plot"></div>
 
@@ -173,18 +271,33 @@ INDEX_HTML = r"""
     const winSecEl = document.getElementById("winSec");
     const fsHzEl = document.getElementById("fsHz");
     const clearBtn = document.getElementById("clearBtn");
+    const pulseWinEl = document.getElementById("pulseWin");
+    const pulseEl = document.getElementById("pulse");
+    const metricRrEl = document.getElementById("metricRr");
+    const metricSdnnEl = document.getElementById("metricSdnn");
+    const metricRangeEl = document.getElementById("metricRange");
+    const metricBeatsEl = document.getElementById("metricBeats");
+    const metricBpmEl = document.getElementById("metricBpm");
+    const plotEl = document.getElementById("plot");
+
+    const DECIMATE = 5; // должно совпадать с серверной DECIMATE
 
     let y = [];
     let x = [];
 
-    function getWinSamples() {
+    function getEffectiveFs() {
       const fs = Number(fsHzEl.value || 250);
+      return fs / DECIMATE;
+    }
+
+    function getWinSamples() {
+      const fs = getEffectiveFs();
       const winSec = Number(winSecEl.value || 10);
       return Math.max(10, Math.floor(fs * winSec));
     }
 
     function rebuildX() {
-      const fs = Number(fsHzEl.value || 250);
+      const fs = getEffectiveFs();
       const n = y.length;
       x = new Array(n);
       for (let i = 0; i < n; i++) {
@@ -192,9 +305,16 @@ INDEX_HTML = r"""
       }
     }
 
+    function getPlotSize() {
+      const headerHeight = document.querySelector("header").offsetHeight;
+      return {
+        width: window.innerWidth,
+        height: Math.max(200, window.innerHeight - headerHeight)
+      };
+    }
+
     const opts = {
-      width: Math.min(1200, window.innerWidth - 40),
-      height: 450,
+      ...getPlotSize(),
       scales: { x: { time: false } },
       series: [
         { label: "t (s)" },
@@ -206,12 +326,13 @@ INDEX_HTML = r"""
       ],
     };
 
-    let u = new uPlot(opts, [[0],[0]], document.getElementById("plot"));
+    let u = new uPlot(opts, [[0],[0]], plotEl);
 
     function updatePlot() {
       rebuildX();
       // resetScales=true и новые ссылки на массивы (slice) — чтобы точно рисовалось
       u.setData([x.slice(), y.slice()], true);
+      updatePulse();
     }
 
     function pushValue(v) {
@@ -224,12 +345,133 @@ INDEX_HTML = r"""
       y = [];
       x = [];
       u.setData([[0],[0]], true);
+      updatePulse();
     };
 
     window.addEventListener("resize", () => {
-      u.setSize({width: Math.min(1200, window.innerWidth - 40), height: 450});
+      u.setSize(getPlotSize());
       updatePlot();
     });
+
+    function parsePulseWindows() {
+      const raw = (pulseWinEl.value || "").split(",");
+      const windows = raw
+        .map((v) => Number(v.trim()))
+        .filter((v) => Number.isFinite(v) && v > 0 && v <= 60);
+      return windows.length ? windows : [5, 10, 20];
+    }
+
+    function detectPeaks(samples, fs) {
+      if (samples.length < fs * 2) return null;
+
+      let sum = 0;
+      for (const v of samples) sum += v;
+      const mean = sum / samples.length;
+
+      let variance = 0;
+      for (const v of samples) {
+        const d = v - mean;
+        variance += d * d;
+      }
+      const std = Math.sqrt(variance / samples.length);
+      const threshold = mean + std * 0.6;
+      const minSamples = Math.max(1, Math.floor(fs * 0.25));
+
+      const peaks = [];
+      let lastPeak = -minSamples;
+
+      for (let i = 1; i < samples.length - 1; i++) {
+        const v = samples[i];
+        if (v > threshold && v > samples[i - 1] && v >= samples[i + 1]) {
+          if (i - lastPeak >= minSamples) {
+            peaks.push(i);
+            lastPeak = i;
+          }
+        }
+      }
+
+      return peaks;
+    }
+
+    function computeBpmFromPeaks(peaks, samples, fs) {
+      if (!peaks || peaks.length < 1) return null;
+      const durationSec = samples.length / fs;
+      return Math.round((peaks.length / durationSec) * 60);
+    }
+
+    function computeHrMetrics(samples, fs) {
+      const peaks = detectPeaks(samples, fs);
+      if (!peaks || peaks.length < 2) return null;
+
+      const rr = [];
+      for (let i = 1; i < peaks.length; i++) {
+        rr.push((peaks[i] - peaks[i - 1]) / fs);
+      }
+
+      const rrMean = rr.reduce((a, b) => a + b, 0) / rr.length;
+      const rrMin = Math.min(...rr);
+      const rrMax = Math.max(...rr);
+
+      let variance = 0;
+      for (const v of rr) {
+        const d = v - rrMean;
+        variance += d * d;
+      }
+      const sdnn = Math.sqrt(variance / rr.length);
+
+      return {
+        bpm: Math.round(60 / rrMean),
+        rrMeanMs: Math.round(rrMean * 1000),
+        rrMinMs: Math.round(rrMin * 1000),
+        rrMaxMs: Math.round(rrMax * 1000),
+        sdnnMs: Math.round(sdnn * 1000),
+        beats: peaks.length,
+      };
+    }
+
+    function updatePulse() {
+      const fs = getEffectiveFs();
+      const windows = parsePulseWindows();
+      const parts = windows.map((sec) => {
+        const samples = Math.floor(sec * fs);
+        if (y.length < samples) {
+          return `${sec}s: —`;
+        }
+        const segment = y.slice(-samples);
+        const peaks = detectPeaks(segment, fs);
+        const bpm = computeBpmFromPeaks(peaks, segment, fs);
+        return `${sec}s: ${bpm ?? "—"} bpm`;
+      });
+      pulseEl.textContent = `Pulse: ${parts.join(" | ")}`;
+
+      const metricWindow = Math.max(...windows);
+      const metricSamples = Math.floor(metricWindow * fs);
+      if (y.length < metricSamples) {
+        metricRrEl.textContent = "RR mean: —";
+        metricSdnnEl.textContent = "SDNN: —";
+        metricRangeEl.textContent = "RR min/max: —";
+        metricBeatsEl.textContent = "Beats: —";
+        metricBpmEl.textContent = "BPM: —";
+        return;
+      }
+
+      const metricSegment = y.slice(-metricSamples);
+      const metrics = computeHrMetrics(metricSegment, fs);
+      if (!metrics) {
+        metricRrEl.textContent = "RR mean: —";
+        metricSdnnEl.textContent = "SDNN: —";
+        metricRangeEl.textContent = "RR min/max: —";
+        metricBeatsEl.textContent = "Beats: —";
+        metricBpmEl.textContent = "BPM: —";
+        return;
+      }
+
+      metricRrEl.textContent = `RR mean: ${metrics.rrMeanMs} ms`;
+      metricSdnnEl.textContent = `SDNN: ${metrics.sdnnMs} ms`;
+      metricRangeEl.textContent = `RR min/max: ${metrics.rrMinMs}/${metrics.rrMaxMs} ms`;
+      metricBeatsEl.textContent = `Beats: ${metrics.beats}`;
+      metricBpmEl.textContent = `BPM: ${metrics.bpm}`;
+    }
 
     const wsProto = (location.protocol === "https:") ? "wss" : "ws";
     const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
@@ -303,6 +545,11 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
     flt = ECGFilter(fs=FS_HZ)
 
     buf = ""
+    pending_lines = []
+    decim_acc = 0.0
+    decim_count = 0
+    send_interval = 1.0 / WS_SEND_HZ
+    next_send_ts = asyncio.get_event_loop().time() + send_interval
     try:
         while True:
             data = await reader.read(4096)
@@ -320,7 +567,6 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
             lines = buf.split("\n")
             buf = lines.pop()  # хвост без \n
 
-            out_lines = []
             for line in lines:
                 s = line.strip()
                 if not s:
@@ -332,15 +578,24 @@ async def tcp_client_handler(reader: asyncio.StreamReader, writer: asyncio.Strea
 
                 y = flt.process(v)
 
-                # сохраняем и рассылаем уже фильтрованный
+                # сохраняем в кольцевой буфер (в полной частоте)
                 ring.append(y)
                 if len(ring) > RING_MAX:
                     del ring[:len(ring) - RING_MAX]
 
-                out_lines.append(f"{y:.2f}")
+                # децимация с усреднением
+                decim_acc += y
+                decim_count += 1
+                if decim_count >= DECIMATE:
+                    pending_lines.append(f"{(decim_acc / decim_count):.2f}")
+                    decim_acc = 0.0
+                    decim_count = 0
 
-            if out_lines:
-                await broadcast("\n".join(out_lines) + "\n")
+            now = asyncio.get_event_loop().time()
+            if pending_lines and now >= next_send_ts:
+                await broadcast("\n".join(pending_lines) + "\n")
+                pending_lines.clear()
+                next_send_ts = now + send_interval
 
     finally:
         try:
