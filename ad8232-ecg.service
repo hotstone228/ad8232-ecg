@@ -1,0 +1,31 @@
+[Unit]
+Description=AD8232 ECG TCP + Web Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Рабочая директория проекта
+WorkingDirectory=/opt/ad8232_ecg
+
+# Python из venv
+ExecStart=/opt/ad8232_ecg/.venv/bin/python main.py
+
+# Перезапуск при падении
+Restart=always
+RestartSec=2
+
+# Логи
+StandardOutput=journal
+StandardError=journal
+
+# Если понадобится доступ к сети сразу
+Environment=PYTHONUNBUFFERED=1
+
+# Пользователь (пока root, ниже скажу как сделать лучше)
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
